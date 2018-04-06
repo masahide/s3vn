@@ -3,11 +3,12 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"os"
 	"path/filepath"
 
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/k0kubun/pp"
 	"github.com/masahide/s3vn/pkg/s3vn"
 	homedir "github.com/mitchellh/go-homedir"
@@ -41,9 +42,7 @@ and usage of using your command. For example:
 Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("commit called")
-		},
+		Run: commitCmdRun,
 	}
 
 	// initCmd represents the init command
@@ -101,6 +100,11 @@ func init() {
 func configCmdRun(cmd *cobra.Command, args []string) {
 }
 func commitCmdRun(cmd *cobra.Command, args []string) {
+	ctx := context.Background()
+	sess := session.Must(session.NewSession())
+	sn := s3vn.New(sess, conf)
+	sn.Commit(ctx, "./")
+
 }
 
 func initCmdRun(cmd *cobra.Command, args []string) {
@@ -129,13 +133,14 @@ func initCmdRun(cmd *cobra.Command, args []string) {
 	workDirViper.Set("MaxWorker", conf.MaxWorker)
 	workDirViper.Set("MaxFiles", conf.MaxFiles)
 	workDirViper.WriteConfig()
+	pp.Println(conf)
 
 }
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
 	cfgFile := "config.yaml"
-	pp.Println("initConfig....")
+	//pp.Println("initConfig....")
 	if cfgDir != "" {
 		viper.SetConfigFile(filepath.Join(cfgDir, cfgFile))
 		viper.SetConfigName("config")
@@ -175,8 +180,8 @@ func initConfig() {
 		log.Fatal(err)
 	}
 	workDirCfgDir = filepath.Join(cfgDir, workPath)
-	pp.Println("workDirCfgDir:", workDirCfgDir)
-	pp.Println("cfgDir:", cfgDir)
+	//pp.Println("workDirCfgDir:", workDirCfgDir)
+	//pp.Println("cfgDir:", cfgDir)
 	if _, err := os.Stat(workDirCfgDir); err != nil {
 		if err := os.MkdirAll(workDirCfgDir, 0755); err != nil {
 			log.Println(err)

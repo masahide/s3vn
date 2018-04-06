@@ -171,13 +171,11 @@ func (sn *S3vn) reHashCommit(ctx context.Context, files FileInfos) error {
 			if err := fi.getThash(prefix); err != nil {
 				return err
 			}
-			return sn.upload(ctx, fi)
+			//return sn.upload(ctx, fi)
+			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		return err
-	}
-	return nil
+	return g.Wait()
 }
 
 func (sn *S3vn) upload(ctx context.Context, fi *FileInfo) error {
@@ -213,7 +211,8 @@ func New(sess *session.Session, conf Conf) *S3vn {
 	return sn
 }
 
-func (sn *S3vn) commit(ctx context.Context, path string) {
+// Commit is makeFIleinfos and reHashCommit
+func (sn *S3vn) Commit(ctx context.Context, path string) {
 	// stage1
 	if err := sn.makeFileInfos(path); err != nil {
 		log.Fatal(err)
