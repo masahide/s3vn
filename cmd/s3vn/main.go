@@ -107,7 +107,7 @@ func commitCmdRun(cmd *cobra.Command, args []string) {
 	sn := s3vn.New(sess, conf)
 
 	if conf.PrintLog {
-		pp.Println(conf)
+		pp.Println(conf) // nolint:errcheck
 	}
 	sn.Commit(ctx, "./")
 

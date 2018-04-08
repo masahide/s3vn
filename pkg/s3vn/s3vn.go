@@ -183,7 +183,7 @@ func (sn *S3vn) upload(ctx context.Context, fi *FileInfo) error {
 	if err != nil {
 		return errors.Wrap(err, "failed upload os.Open")
 	}
-	defer f.Close()
+	defer f.Close() // nolint:errcheck
 	fi.S3Key = fi.makeKey()
 	if fi.Size > partSize {
 		return sn.multipartUpload(ctx, f, fi)
@@ -207,7 +207,7 @@ func (sn *S3vn) upload(ctx context.Context, fi *FileInfo) error {
 	return nil
 }
 
-func (sn *S3vn) multipartUpload(ctx context.Context, f *os.File, fi *FileInfo) error {
+func (sn *S3vn) multipartUpload(ctx context.Context, f io.Reader, fi *FileInfo) error {
 	upParams := &s3manager.UploadInput{
 		Bucket: &sn.S3bucket,
 		Key:    &fi.S3Key,
