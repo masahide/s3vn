@@ -2,10 +2,16 @@ package s3vn
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"crypto/sha256"
+	"io"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/cespare/xxhash"
+	"github.com/masahide/s3vn/pkg/etag"
+	"github.com/pkg/errors"
 )
 
 /*
@@ -28,6 +34,43 @@ const (
 	testFile     = "test/1mb"
 	testpartSize = 5 * 1024 * 1024
 )
+
+func whashSum(prefix []byte, r io.Reader) ([]byte, uint64, error) {
+	xx := xxhash.New()
+	sha := sha256.New()
+	w := io.MultiWriter(xx, sha)
+
+	w.Write(prefix)
+	if _, err := io.Copy(w, r); err != nil {
+		return nil, 0, errors.Wrap(err, "hash sum error.")
+	}
+	return sha.Sum(nil), xx.Sum64(), nil
+}
+
+func sha256Sum(prefix []byte, r io.Reader) ([]byte, error) {
+	sha := sha256.New()
+	sha.Write(prefix) // errは常にnill see: https://github.com/golang/go/blob/master/src/crypto/sha256/sha256.go#L203-L223
+	if _, err := io.Copy(sha, r); err != nil {
+		return nil, errors.Wrap(err, "hash sum error.")
+	}
+	return sha.Sum(nil), nil
+}
+
+func sha1Sum(prefix []byte, r io.Reader) ([]byte, error) {
+	sha := sha1.New()
+	sha.Write(prefix) // err は常にnull see: https://github.com/golang/go/blob/master/src/crypto/sha1/sha1.go#L130-L151
+	if _, err := io.Copy(sha, r); err != nil {
+		return nil, errors.Wrap(err, "hash sum error.")
+	}
+	return sha.Sum(nil), nil
+}
+func etagSum(partsize int64, r io.Reader) ([]byte, error) {
+	et := etag.New(partsize)
+	if _, err := io.Copy(et, r); err != nil {
+		return nil, errors.Wrap(err, "etag sum error.")
+	}
+	return et.Sum(nil), nil
+}
 
 func BenchmarkThashSum(b *testing.B) {
 	for i := 0; i < b.N; i++ {
@@ -127,7 +170,7 @@ func TestThashSum(t *testing.T) {
 				t.Errorf("err %d:whashSum() err = %#v, want:%#v", i, err, vt.expectedErr)
 			}
 		}
-		if bytes.Compare(sha, vt.expectedSha256) != 0 {
+		if !bytes.Equal(sha, vt.expectedSha256) {
 			t.Errorf("err %d:whashSum() = sha256:%#v, want:%#v", i, sha, vt.expectedSha256)
 		}
 		if xx != vt.expectedXx {
@@ -136,23 +179,15 @@ func TestThashSum(t *testing.T) {
 		if string(etag) != vt.expectedEtag {
 			t.Errorf("err %d:whashSum() = etag:%s, want:%s", i, etag, vt.expectedEtag)
 		}
-		f.Close()
-		f, err = os.Open(vt.filepath)
-		if err != nil {
-			t.Error("can't open testfile")
-		}
-		xxsum, err := xxSum(vt.prefix, f)
-		f.Close()
-		f, err = os.Open(vt.filepath)
-		if err != nil {
-			t.Error("can't open testfile")
-		}
-		sha256sum, err := sha256Sum(vt.prefix, f)
+		f.Seek(0, io.SeekStart)
+		xxsum, _ := xxSum(vt.prefix, f)
+		f.Seek(0, io.SeekStart)
+		sha256sum, _ := sha256Sum(vt.prefix, f)
 		f.Close()
 		if xx != xxsum {
 			t.Errorf("err %d:whashSum() = xxSum():%#v, want:%#v", i, xx, xxsum)
 		}
-		if bytes.Compare(sha, sha256sum) != 0 {
+		if !bytes.Equal(sha, sha256sum) {
 			t.Errorf("err %d:whashSum() = sha256Sum():%#v, want:%#v", i, sha, sha256sum)
 		}
 
@@ -191,29 +226,21 @@ func TestWhashSum(t *testing.T) {
 				t.Errorf("err %d:whashSum() err = %#v, want:%#v", i, err, vt.expectedErr)
 			}
 		}
-		if bytes.Compare(sha, vt.expectedSha256) != 0 {
+		if !bytes.Equal(sha, vt.expectedSha256) {
 			t.Errorf("err %d:whashSum() = sha256:%#v, want:%#v", i, sha, vt.expectedSha256)
 		}
 		if xx != vt.expectedXx {
 			t.Errorf("err %d:whashSum() = xx:%#v, want:%#v", i, xx, vt.expectedXx)
 		}
-		f.Close()
-		f, err = os.Open(vt.filepath)
-		if err != nil {
-			t.Error("can't open testfile")
-		}
-		xxsum, err := xxSum(vt.prefix, f)
-		f.Close()
-		f, err = os.Open(vt.filepath)
-		if err != nil {
-			t.Error("can't open testfile")
-		}
-		sha256sum, err := sha256Sum(vt.prefix, f)
+		f.Seek(0, io.SeekStart)
+		xxsum, _ := xxSum(vt.prefix, f)
+		f.Seek(0, io.SeekStart)
+		sha256sum, _ := sha256Sum(vt.prefix, f)
 		f.Close()
 		if xx != xxsum {
 			t.Errorf("err %d:whashSum() = xxSum():%#v, want:%#v", i, xx, xxsum)
 		}
-		if bytes.Compare(sha, sha256sum) != 0 {
+		if !bytes.Equal(sha, sha256sum) {
 			t.Errorf("err %d:whashSum() = sha256Sum():%#v, want:%#v", i, sha, sha256sum)
 		}
 
@@ -239,14 +266,14 @@ func TestMakePrefixBytes(t *testing.T) {
 	}
 	for i, vt := range vtests {
 		b := makePrefixBytes(vt.prefix, vt.size)
-		if bytes.Compare(vt.expected, b) != 0 {
+		if !bytes.Equal(vt.expected, b) {
 			t.Errorf("err %d:makePrefix() = %#v, want:%#v", i, b, vt.expected)
 		}
-		if bytes.Compare(b[0:len(vt.prefix)+1], []byte(string(vt.prefix)+" ")) != 0 {
+		if !bytes.Equal(b[0:len(vt.prefix)+1], []byte(string(vt.prefix)+" ")) {
 			t.Errorf("err %d:makePrefix() = prefix %#v, want:%#v", i, b[0:len(vt.prefix)+1], []byte(string(vt.prefix)+" "))
 
 		}
-		if bytes.Compare(b[0:len(vt.prefix)+1], []byte(string(vt.prefix)+" ")) != 0 {
+		if !bytes.Equal(b[0:len(vt.prefix)+1], []byte(string(vt.prefix)+" ")) {
 			t.Errorf("err %d:makePrefix() = prefix %#v, want:%#v", i, b[0:len(vt.prefix)+1], []byte(string(vt.prefix)+" "))
 
 		}
@@ -261,30 +288,30 @@ func TestDifference(t *testing.T) {
 	}{
 		{
 			old: []FileInfo{
-				FileInfo{Mode: 0, Path: "a", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
-				FileInfo{Mode: 0, Path: "b", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "a", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "b", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
 			},
 			new: []FileInfo{
-				FileInfo{Mode: 0, Path: "a", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
-				FileInfo{Mode: 0, Path: "b", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "a", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "b", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
 			},
 			expected: []FileInfo{
-				FileInfo{Mode: 0, Path: "a", Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "a", Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
 			},
 		},
 		{
 			old: []FileInfo{
-				FileInfo{Mode: 0, Path: "a", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
-				FileInfo{Mode: 0, Path: "b", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "a", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "b", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
 			},
 			new: []FileInfo{
-				FileInfo{Mode: 0, Path: "a", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
-				FileInfo{Mode: 0, Path: "b", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
-				FileInfo{Mode: 0, Path: "c", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "a", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729272, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "b", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "c", Sha256: [32]byte{0x28, 0x18, 0x96, 0x61, 0x52, 0xf1, 0xd8, 0x45, 0xa1, 0xf, 0xa6, 0x28, 0x3d, 0xc0, 0xfd, 0xbe, 0xf8, 0x84, 0xad, 0x2, 0x1, 0x73, 0x5e, 0xcf, 0xc9, 0x98, 0x6, 0x91, 0xfe, 0x3e, 0x23, 0xf2}, Xxhash: 12, Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
 			},
 			expected: []FileInfo{
-				FileInfo{Mode: 0, Path: "b", Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
-				FileInfo{Mode: 0, Path: "c", Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "b", Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
+				{Mode: 0, Path: "c", Size: 3, Mtime: time.Unix(1522729273, 0), LinkTo: "/link/to", UID: 1, GID: 2},
 			},
 		},
 	}
@@ -332,7 +359,7 @@ func TestGetThash(t *testing.T) {
 				t.Errorf("err %d:getWhash() err = %#v, want:%#v", i, err, vt.expectedErr)
 			}
 		}
-		if vt.expectedSha256 != nil && bytes.Compare(vt.expectedSha256, vt.f.Sha256[:]) != 0 {
+		if vt.expectedSha256 != nil && !bytes.Equal(vt.expectedSha256, vt.f.Sha256[:]) {
 			t.Errorf("err %d:getWhash() = %#v, want:%#v", i, vt.f.Sha256, vt.expectedSha256)
 		}
 		if vt.expectedXx != vt.f.Xxhash {

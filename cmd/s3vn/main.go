@@ -90,6 +90,8 @@ func init() {
 	rootCmd.PersistentFlags().IntVarP(&conf.MaxWorker, "worker", "", 0, "max worker. default is the same as the number of CPU cores")
 	rootCmd.PersistentFlags().IntVarP(&conf.MaxFiles, "maxfiles", "n", 10000, "max files.")
 	rootCmd.PersistentFlags().BoolVarP(&conf.Force, "force", "f", false, "force mode")
+	rootCmd.PersistentFlags().BoolVarP(&conf.PrintLog, "verbose", "v", false, "verbose output")
+
 	configCmd.Flags().StringVarP(&conf.UserName, "user.name", "u", os.Getenv("USER"), "set username")
 	configCmd.Flags().StringVarP(&chbucket, "chbucket", "b", "", "change s3 bucket")
 	rootCmd.AddCommand(commitCmd)
@@ -103,6 +105,10 @@ func commitCmdRun(cmd *cobra.Command, args []string) {
 	ctx := context.Background()
 	sess := session.Must(session.NewSession())
 	sn := s3vn.New(sess, conf)
+
+	if conf.PrintLog {
+		pp.Println(conf)
+	}
 	sn.Commit(ctx, "./")
 
 }
@@ -113,27 +119,24 @@ func initCmdRun(cmd *cobra.Command, args []string) {
 		if !conf.Force {
 			os.Exit(1)
 		}
-		conf.RepoName = workDirViper.GetString("RepoName")
-		conf.S3bucket = workDirViper.GetString("S3bucket")
-		conf.WorkDir = workDirViper.GetString("WorkDir")
-		conf.MaxWorker = workDirViper.GetInt("MaxWorker")
-		conf.MaxFiles = workDirViper.GetInt("MaxFiles")
-		return
-	}
-	if err := os.Chdir(conf.WorkDir); err != nil {
-		log.Fatalf("failed change directory:%s", conf.WorkDir)
 	}
 	conf.RepoName = args[0]
 	conf.S3bucket = args[1]
 	log.Println("cfgDir:", cfgDir)
-	log.Println("workDir:", conf.WorkDir)
+	absWorkDir, err := filepath.Abs(conf.WorkDir)
+	if err != nil {
+		log.Println(err)
+	}
+	log.Println("workDir:", absWorkDir)
 	workDirViper.Set("RepoName", conf.RepoName)
 	workDirViper.Set("S3bucket", conf.S3bucket)
 	workDirViper.Set("WorkDir", conf.WorkDir)
 	workDirViper.Set("MaxWorker", conf.MaxWorker)
 	workDirViper.Set("MaxFiles", conf.MaxFiles)
-	workDirViper.WriteConfig()
-	pp.Println(conf)
+	if err := workDirViper.WriteConfig(); err != nil {
+		log.Fatalf("failed WriteConfig: %s", err)
+	}
+	pp.Println(conf) // nolint:errcheck
 
 }
 
@@ -153,7 +156,7 @@ func initConfig() {
 		}
 		cfgDir = filepath.Join(home, ".s3vn")
 		if _, err := os.Stat(cfgDir); err != nil {
-			if err := os.Mkdir(cfgDir, 0755); err != nil {
+			if err := os.Mkdir(cfgDir, 0700); err != nil {
 				log.Println(err)
 				os.Exit(1)
 			}
@@ -167,11 +170,15 @@ func initConfig() {
 
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil {
-		viper.WriteConfig()
+		if err := viper.WriteConfig(); err == nil {
+			log.Printf("failed WriteConfig: %s", err)
+		}
 		log.Println("Using config file:", viper.ConfigFileUsed())
 	}
-	//viper.Set("database.user", "newuser")
-	//viper.Set("owner.name", "John")
+	initWorkdir()
+}
+
+func initWorkdir() {
 	if err := os.Chdir(conf.WorkDir); err != nil {
 		log.Fatalf("failed change directory:%s", conf.WorkDir)
 	}
@@ -183,7 +190,7 @@ func initConfig() {
 	//pp.Println("workDirCfgDir:", workDirCfgDir)
 	//pp.Println("cfgDir:", cfgDir)
 	if _, err := os.Stat(workDirCfgDir); err != nil {
-		if err := os.MkdirAll(workDirCfgDir, 0755); err != nil {
+		if err := os.MkdirAll(workDirCfgDir, 0700); err != nil {
 			log.Println(err)
 			os.Exit(1)
 		}
@@ -191,6 +198,13 @@ func initConfig() {
 	workDirViper = viper.New()
 	confFile := filepath.Join(workDirCfgDir, "config.yaml")
 	workDirViper.SetConfigFile(confFile)
+	if err := workDirViper.ReadInConfig(); err == nil {
+		conf.RepoName = workDirViper.GetString("RepoName")
+		conf.S3bucket = workDirViper.GetString("S3bucket")
+		conf.WorkDir = workDirViper.GetString("WorkDir")
+		conf.MaxWorker = workDirViper.GetInt("MaxWorker")
+		conf.MaxFiles = workDirViper.GetInt("MaxFiles")
+	}
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

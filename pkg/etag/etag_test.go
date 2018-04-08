@@ -1,7 +1,6 @@
 package etag
 
 import (
-	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -16,7 +15,7 @@ func multipartEtag(filepath string, partsize int64) (string, error) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if partsize > fileinfo.Size() {
+	if partsize >= fileinfo.Size() {
 		f, _ := os.Open(filepath)
 		h := md5.New()
 		io.Copy(h, f)
@@ -27,7 +26,7 @@ func multipartEtag(filepath string, partsize int64) (string, error) {
 		log.Fatal(err)
 	}
 	defer f.Close()
-	md5Buf := &bytes.Buffer{}
+	sum := md5.New()
 	var i int
 	var breakFlg bool
 	for {
@@ -45,18 +44,12 @@ func multipartEtag(filepath string, partsize int64) (string, error) {
 		i++
 		hash := h.Sum(nil)
 		//pp.Println("org", hash)
-		if _, err := md5Buf.Write(hash); err != nil {
-			return "", err
-		}
+		sum.Write(hash)
 		if breakFlg {
 			break
 		}
 	}
-	h := md5.New()
-	if _, err := io.Copy(h, md5Buf); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s-%d", hex.EncodeToString(h.Sum(nil)), i), nil
+	return fmt.Sprintf("%s-%d", hex.EncodeToString(sum.Sum(nil)), i), nil
 }
 
 func TestWrite(t *testing.T) {
@@ -87,6 +80,7 @@ func TestWrite(t *testing.T) {
 			t.Error(err)
 		}
 		res := string(h.Sum(nil))
+		//log.Printf("%d:mpEtag.Sum() =%#v, want:%#v", i, res, expect)
 		if res != expect {
 			t.Errorf("err %d:mpEtag.Sum() =%#v, want:%#v", i, res, expect)
 		}

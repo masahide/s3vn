@@ -9,4 +9,5 @@ type Conf struct {
 	MaxWorker int
 	UserName  string
 	Force     bool
+	PrintLog  bool
 }
