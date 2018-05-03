@@ -1,10 +1,13 @@
 package s3vn
 
 import (
+	"compress/gzip"
 	"context"
-	"crypto/sha256"
+	"crypto/md5"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/gob"
 	"fmt"
 	"io"
 	"log"
@@ -29,7 +32,9 @@ import (
 const (
 	//	limit    = 24                // 同時実行数の上限
 	//	weight   = 1                 // 1処理あたりの実行コスト
-	partSize = 100 * 1024 * 1024 // 100MB
+	partSize    = 100 * 1024 * 1024 // 100MB
+	listDirName = "list"
+	etagSize    = 32 + 1 + 5 // "57979c7995baf9f8b3cfd5566e645f8e-10000"
 )
 
 var (
@@ -40,32 +45,33 @@ var (
 
 // FileInfo file infomation
 type FileInfo struct {
-	Mode   os.FileMode
 	Path   string
-	Sha256 [sha256.Size]byte
+	LinkTo string
+	Mtime  int64
+	Size   int64
+	Mode   uint32 // os.FileMode
+	UID    uint32
+	GID    uint32
+	Sha512 [sha512.Size]byte
 	Xxhash uint64
 	Etag   string
 	S3Key  string
-	Size   int64
-	Mtime  time.Time
-	LinkTo string
-	UID    uint32
-	GID    uint32
 	//Gzip   bool
 	//Kms    bool
 }
 
 func (f *FileInfo) makeKey() string {
-	// base64(join(Sha256, sha256.sum(XxHash, Etag)))
-	b := make([]byte, 8+len(f.Etag))
+	// base64(join(Sha512, XxHash, Etag))
+	b := make([]byte, 8+md5.Size)
 	binary.LittleEndian.PutUint64(b, f.Xxhash)
-	copy(b[8:], []byte(f.Etag))
-	h := sha256.New()
+	etag, _ := md5StringToBytes(f.Etag)
+	copy(b[8:], etag)
+	h := sha512.New()
 	h.Write(b) // nolint:errcheck
 	// Writeはerrを返さない see: https://github.com/golang/go/blob/1d547e4a68f1acff6b7d1c656ea8aa665e34055f/src/crypto/sha256/sha256.go#L195-L216
-	res := make([]byte, len(f.Sha256)*2)
-	copy(res, f.Sha256[:])
-	copy(res[len(f.Sha256):], h.Sum(nil)[:])
+	res := make([]byte, len(f.Sha512)+len(b))
+	copy(res, f.Sha512[:])
+	copy(res[len(f.Sha512):], b)
 	return base64URLSafe(res)
 }
 
@@ -81,7 +87,7 @@ func (f *FileInfo) getThash(prefix []byte) error {
 	}
 	f.Xxhash = xx
 	f.Etag = string(etag)
-	copy(f.Sha256[:], sha)
+	copy(f.Sha512[:], sha)
 	return nil
 
 }
@@ -120,7 +126,7 @@ func (f FileInfos) Less(i, j int) bool {
 
 // S3vn is filelist of s3vn dir infomation
 type S3vn struct {
-	Files []FileInfo
+	Files FileInfos
 	s3m   *s3manager.Uploader
 	Conf
 }
@@ -130,7 +136,6 @@ func (sn *S3vn) append(file FileInfo) {
 }
 
 func (sn *S3vn) makeFileInfos(dir string) error {
-	sn.Files = make(FileInfos, 0, 10000)
 	if err := filepath.Walk(dir, sn.walk); err != nil {
 		return errors.Wrap(err, "Failed makeFileInfos.")
 	}
@@ -162,6 +167,9 @@ func (sn *S3vn) reHashCommit(ctx context.Context, files FileInfos) error {
 	g, ctx := errgroup.WithContext(ctx)
 	for i := range files {
 		fi := &files[i]
+		if fi.Mode&uint32(os.ModeType) != 0 {
+			continue
+		}
 		if err := sem.Acquire(ctx, 1); err != nil {
 			log.Printf("Failed to acquire semaphore: %v", err)
 			break
@@ -232,6 +240,13 @@ func (sn *S3vn) multipartUpload(ctx context.Context, f io.Reader, fi *FileInfo) 
 	return nil
 }
 
+/*
+func (sn *S3vn) marshalFileInfos() {
+	data, err := proto.Marshal(sn.Files)
+
+}
+*/
+
 // New S3vn struct
 func New(sess client.ConfigProvider, conf Conf) *S3vn {
 	sn := &S3vn{
@@ -264,11 +279,40 @@ func (sn *S3vn) Commit(ctx context.Context, path string) {
 	// stage3
 	// 差分アップロード
 	err := sn.reHashCommit(ctx, diff)
-	log.Printf("reHashCommit: %+v", err)
+	if err != nil {
+		log.Fatalf("reHashCommit: %+v", err)
+	}
 
 	// stage4
 	// TODO:リストアップロード
 	//pp.Println(diff) // nolint:errcheck
+}
+
+func (sn *S3vn) saveList() error {
+	now := time.Now()
+	DirPath := now.Format("2006/0102")
+	fileName := now.Format("150405999999999")
+
+	listDir := filepath.Join(sn.Conf.ConfDir, listDirName, DirPath)
+	if err := os.MkdirAll(listDir, 0700); err != nil {
+		return fmt.Errorf("Failed MkdirAll(%s); err:%s", listDir, err)
+	}
+	filePath := filepath.Join(listDir, fileName)
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("Failed open(%s); err:%s", filePath, err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	enc := gob.NewEncoder(gz)
+	if err := enc.Encode(sn.Files); err != nil {
+		return fmt.Errorf("encode:%s", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("Failed gz.Close(); err:%s", err)
+	}
+	return nil
+
 }
 
 func difference(old, new FileInfos) FileInfos {
@@ -277,12 +321,12 @@ func difference(old, new FileInfos) FileInfos {
 	}
 	newMap := map[FileInfo]int{}
 	for i, fi := range new {
-		fi.Sha256 = [sha256.Size]byte{}
+		fi.Sha512 = [sha512.Size]byte{}
 		fi.Xxhash = 0
 		newMap[fi] = i
 	}
 	for _, fi := range old {
-		fi.Sha256 = [sha256.Size]byte{}
+		fi.Sha512 = [sha512.Size]byte{}
 		fi.Xxhash = 0
 		_, ok := newMap[fi]
 		if ok {
@@ -301,7 +345,7 @@ func difference(old, new FileInfos) FileInfos {
 func thashSum(prefix []byte, r io.Reader) ([]byte, []byte, uint64, error) {
 	et := etag.New(partSize)
 	xx := xxhash.New()
-	sha := sha256.New()
+	sha := sha512.New()
 	w := io.MultiWriter(xx, sha)
 	t := io.MultiWriter(w, et)
 
@@ -340,14 +384,14 @@ func base64URLSafe(r []byte) string {
 
 func mkFileInfo(path string, info os.FileInfo) (FileInfo, error) {
 	fi := FileInfo{
-		Mode:  info.Mode(),
+		Mode:  uint32(info.Mode()),
 		Size:  info.Size(),
-		Mtime: info.ModTime(),
+		Mtime: info.ModTime().Unix(),
 		Path:  path,
 		UID:   info.Sys().(*syscall.Stat_t).Uid,
 		GID:   info.Sys().(*syscall.Stat_t).Gid,
 	}
-	if fi.Mode&os.ModeSymlink != 0 {
+	if fi.Mode&uint32(os.ModeSymlink) != 0 {
 		var err error
 		fi.LinkTo, err = os.Readlink(path)
 		if err != nil {
@@ -355,4 +399,19 @@ func mkFileInfo(path string, info os.FileInfo) (FileInfo, error) {
 		}
 	}
 	return fi, nil
+}
+
+func md5StringToBytes(s string) ([]byte, error) {
+	if len(s) < md5.Size {
+		return nil, fmt.Errorf("size of md5 is small. string:%s", s)
+	}
+	res := make([]byte, md5.Size)
+	for i := 0; i < md5.Size; i++ {
+		val, err := strconv.ParseUint(s[i*2:i*2+2], 16, 8)
+		if err != nil {
+			return nil, err
+		}
+		res[i] = byte(val)
+	}
+	return res, nil
 }

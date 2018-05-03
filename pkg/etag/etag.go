@@ -67,6 +67,9 @@ func (m *mpEtag) Write(p []byte) (nn int, err error) {
 }
 
 func (m *mpEtag) Sum(in []byte) []byte {
+	if m.part == 0 && m.crrSize == 0 {
+		return []byte(hex.EncodeToString(m.crrMD5.Sum(nil)))
+	}
 	if m.part == 1 && m.crrSize == 0 {
 		return []byte(hex.EncodeToString(m.lastHash))
 	}

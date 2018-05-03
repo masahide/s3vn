@@ -58,6 +58,7 @@ func TestWrite(t *testing.T) {
 		partsize int64
 		expected string
 	}{
+		{filepath: "test/0byte", partsize: int64(1024)},
 		{filepath: "test/1mb", partsize: int64(1024)},
 		{filepath: "test/1mb", partsize: int64(1024 - 1)},
 		{filepath: "test/1mb", partsize: int64(1024 + 1)},
